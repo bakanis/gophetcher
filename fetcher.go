@@ -12,12 +12,14 @@ import (
 
 type (
 	Fetcher struct {
-		urls    chan string
-		wg      sync.WaitGroup
-		stop    chan interface{}
-		workers int
-		hl      func(*FetchResponse)
-		Client  *http.Client
+		urls      chan string
+		responses chan *FetchResponse
+		wg        sync.WaitGroup
+		stop      chan interface{}
+		waiters   chan interface{}
+		workers   int
+		hl        func(*FetchResponse)
+		Client    *http.Client
 	}
 
 	FetchResponse struct {
@@ -33,18 +35,19 @@ type (
 		ResponseCode int
 		Date         string
 		Ip           string
+
+		waiter chan interface{}
 	}
 
 	FetchResponses struct {
-		responses []FetchResponse
+		responses []*FetchResponse
 	}
 )
 
-func NewFetcher(handler func(*FetchResponse)) *Fetcher {
+func NewFetcher() *Fetcher {
 	f := new(Fetcher)
 	f.urls = make(chan string)
 	f.workers = 20
-	f.hl = handler
 	return f
 }
 
@@ -53,10 +56,10 @@ func (f *Fetcher) Start() {
 		go func() {
 			for {
 				select {
-				case v := <-f.urls:
-					r, _ := f.fetch(v)
+				case v := <-f.responses:
+					f.fetch(v)
 					f.wg.Done()
-					f.hl(r)
+					v.waiter <- new(interface{})
 				}
 			}
 		}()
@@ -68,15 +71,30 @@ func (f *Fetcher) Wait() {
 }
 
 func (f *Fetcher) Send(url ...string) FetchResponses {
+	ch := make(chan interface{})
+	frs := []*FetchResponse{}
 	for _, v := range url {
+		fr := new(FetchResponse)
+		fr.TargetUrl = v
+		fr.waiter = ch
 		f.wg.Add(1)
-		f.urls <- v
+		f.responses <- fr
+		frs = append(frs, fr)
 	}
-	return FetchResponses{}
+
+	for i := range frs {
+		<-frs[i].waiter
+	}
+	return FetchResponses{responses: frs}
 }
 
-func (f *Fetcher) fetch(url string) (fr *FetchResponse, err error) {
-	fr = new(FetchResponse)
+func (f *Fetcher) Fetch(fr *FetchResponse) {
+	f.fetch(fr)
+}
+
+func (f *Fetcher) fetch(fr *FetchResponse) {
+	//fr = new(FetchResponse)
+	url := fr.TargetUrl
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return
